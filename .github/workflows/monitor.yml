@@ -2,14 +2,14 @@ name: Flight Price Monitor
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # 10분마다 실행
-  workflow_dispatch:           # 수동 실행 버튼
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # prices.json 커밋 권한
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -22,7 +22,9 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: |
+          pip install requests beautifulsoup4 playwright
+          playwright install chromium --with-deps
 
       - name: Run price monitor
         env:
