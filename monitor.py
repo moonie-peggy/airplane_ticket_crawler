@@ -66,10 +66,20 @@ def price_alert(name: str, route: str, cur: int, prev: int, source: str, url: st
     )
 
 # ── 가격 이력 ─────────────────────────────────────────────────────────────────
+DATE_KEY = f"{DEP_DASH}~{RET_DASH}"   # ex) "2026-07-22~2026-07-26"
+
 def load_prices() -> dict:
-    return json.loads(PRICES_FILE.read_text(encoding="utf-8")) if PRICES_FILE.exists() else {}
+    if not PRICES_FILE.exists():
+        return {}
+    data = json.loads(PRICES_FILE.read_text(encoding="utf-8"))
+    # 날짜가 바뀌었으면 이전 가격 전부 초기화
+    if data.get("__date__") != DATE_KEY:
+        print(f"[INFO] 날짜 변경 감지 ({data.get('__date__')} → {DATE_KEY}), 가격 초기화")
+        return {}
+    return data
 
 def save_prices(data: dict):
+    data["__date__"] = DATE_KEY
     PRICES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ── Playwright 공통 브라우저 컨텍스트 ──────────────────────────────────────────
