@@ -108,23 +108,44 @@ async def scrape_naver(pw, frm: str, to: str) -> dict | None:
         f"{frm}-{to}-{DEP}/{to}-{frm}-{RET}?adult=1"
     )
     browser, page = await new_page(pw)
+    price_from_api = []
+
+    async def on_response(resp):
+        # 네이버 항공 검색 결과 API 인터셉트
+        if "airline-api.naver.com" in resp.url or "techminds.pstatic.net/flight" in resp.url:
+            try:
+                ctype = resp.headers.get("content-type", "")
+                if "json" in ctype:
+                    body = await resp.json()
+                    text = json.dumps(body)
+                    nums = [int(n) for n in re.findall(r'\b(\d{5,7})\b', text)
+                            if 50_000 < int(n) < 5_000_000]
+                    if nums:
+                        price_from_api.extend(nums)
+            except Exception:
+                pass
+
+    page.on("response", on_response)
     try:
         await page.goto(url, timeout=40_000, wait_until="domcontentloaded")
-        # 가격 카드 로딩 대기 (최대 25초)
-        try:
-            await page.wait_for_selector(
-                '[class*="price_num"], [class*="ItemPrice"], [class*="fareItem"]',
-                timeout=25_000
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(2)
+        # 항공권 결과 로딩 대기 (최대 30초)
+        for _ in range(6):
+            await asyncio.sleep(5)
+            if price_from_api:
+                break
 
-        # 페이지 텍스트에서 가격 추출
+        if price_from_api:
+            valid = [p for p in price_from_api if 80_000 < p < 5_000_000]
+            if valid:
+                return {"price": min(valid), "url": url}
+
+        # 폴백: DOM에서 '원' 단위 텍스트 추출
         content = await page.content()
-        prices = extract_prices(content)
-        if prices:
-            return {"price": min(prices), "url": url}
+        won_prices = [int(m.replace(",", "")) for m in re.findall(r"([\d,]{5,9})원", content)
+                      if 80_000 < int(m.replace(",", "")) < 5_000_000]
+        if won_prices:
+            return {"price": min(won_prices), "url": url}
+
     except Exception as e:
         print(f"    [네이버] {e}")
     finally:
@@ -239,25 +260,34 @@ async def scrape_kayak(pw, frm: str, to: str) -> dict | None:
     browser, page = await new_page(pw)
     try:
         await page.goto(url, timeout=45_000, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(5, 8))
+        # 가격 카드 로딩 대기
         try:
-            await page.wait_for_selector(
-                '[class*="price"], [class*="Price"], [class*="amount"]',
-                timeout=20_000
-            )
+            await page.wait_for_selector('[class*="esgW-price-holder"]', timeout=20_000)
         except Exception:
-            pass
+            await asyncio.sleep(random.uniform(6, 10))
 
+        # 정확한 셀렉터로 가격 추출
+        price_els = await page.query_selector_all('[class*="esgW-price-holder"]')
+        prices = []
+        for el in price_els:
+            txt = await el.inner_text()
+            # "80,277원부터" → 80277
+            m = re.search(r"([\d,]+)원", txt)
+            if m:
+                p = int(m.group(1).replace(",", ""))
+                if 50_000 < p < 5_000_000:
+                    prices.append(p)
+
+        if prices:
+            return {"price": min(prices), "url": url}
+
+        # 폴백: 전체 텍스트 파싱
         content = await page.content()
-        won_prices = [
-            int(m.replace(",", ""))
-            for m in re.findall(r"₩\s*([\d,]+)", content)
-            if 50_000 < int(m.replace(",", "")) < 5_000_000
-        ]
-        if not won_prices:
-            won_prices = extract_prices(content)
+        won_prices = [int(m.replace(",", "")) for m in re.findall(r"([\d,]{5,9})원", content)
+                      if 50_000 < int(m.replace(",", "")) < 5_000_000]
         if won_prices:
             return {"price": min(won_prices), "url": url}
+
     except Exception as e:
         print(f"    [카약] {e}")
     finally:
