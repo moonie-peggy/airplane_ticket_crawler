@@ -7,8 +7,8 @@
     {"from": "ICN", "to": "ULN", "name": "몽골"}
   ],
   "dates": {
-    "departure": "2025-07-22",
-    "return": "2025-07-26"
+    "departure": "2026-07-22",
+    "return": "2026-07-26"
   },
   "price_drop_threshold": 5000,
   "interval_minutes": 10
