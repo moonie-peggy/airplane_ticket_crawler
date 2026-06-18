@@ -51,18 +51,42 @@ def tg(text: str):
     except Exception as e:
         print(f"  [텔레그램] 실패: {e}")
 
-def price_alert(name: str, route: str, cur: int, prev: int, source: str, url: str = ""):
+def price_alert(name: str, route: str, cur: int, prev: int, source: str,
+                url: str = "", result: dict = None):
     diff = prev - cur
     pct  = diff / prev * 100
     emoji = DEST_EMOJI.get(name, "✈️")
     link  = f'\n🔗 <a href="{url}">바로가기</a>' if url else ""
+
+    # 항공편 상세 (카약에서 가져온 경우)
+    detail = ""
+    if result and result.get("top_flights"):
+        flights = result["top_flights"]
+        lines = ["\n✈️ <b>최저가 항공편</b>"]
+        for i, f in enumerate(flights[:3], 1):
+            stop_label = f["stops"] if "경유" in f.get("stops","") or "직항" in f.get("stops","") else ""
+            lines.append(
+                f"{i}. <b>{f['airline']}</b>  {f['price']:,}원\n"
+                f"   ⏱ {f['duration']}  {stop_label}\n"
+                f"   💺 {f['cabin']}"
+            )
+        detail = "\n".join(lines)
+    elif result and result.get("airline"):
+        detail = (
+            f"\n\n✈️ <b>{result['airline']}</b>\n"
+            f"⏱ {result.get('duration','')}  {result.get('stops','')}\n"
+            f"💺 {result.get('cabin','')}"
+        )
+
     tg(
-        f"✈️ <b>항공권 가격 하락!</b>\n\n"
-        f"{emoji} <b>{name}</b> ({route})\n"
+        f"🚨 <b>항공권 가격 하락!</b>\n\n"
+        f"{emoji} <b>{name}</b>  {route}\n"
         f"📅 {DEP_DASH} 출발 / {RET_DASH} 귀국\n\n"
-        f"💰 현재: <b>{cur:,}원</b>\n"
-        f"📉 이전: {prev:,}원  →  -{diff:,}원 ({pct:.1f}% 하락)\n\n"
-        f"📡 출처: {source}{link}"
+        f"💰 현재 최저가: <b>{cur:,}원</b>\n"
+        f"📉 이전가: {prev:,}원  →  -{diff:,}원 ({pct:.1f}% 하락)\n"
+        f"📡 출처: {source}"
+        f"{detail}"
+        f"{link}"
     )
 
 # ── 가격 이력 ─────────────────────────────────────────────────────────────────
@@ -262,6 +286,49 @@ async def scrape_skyscanner(pw, frm: str, to: str) -> dict | None:
     return None
 
 
+def parse_kayak_flights(body_text: str) -> list[dict]:
+    """
+    카약 body 텍스트에서 항공편 파싱.
+    패턴: [경유정보] [경유공항] [소요시간] [항공사] [가격원] [좌석] 선택
+    """
+    lines = [l.strip() for l in body_text.split("\n") if l.strip()]
+    results = []
+    for i, line in enumerate(lines):
+        m = re.match(r"^([\d,]+)원$", line)
+        if not m:
+            continue
+        price = int(m.group(1).replace(",", ""))
+        if not (80_000 < price < 5_000_000):
+            continue
+        # 바로 위 줄 = 항공사, 2줄 위 = 소요시간, 3줄 위 = 경유정보
+        airline  = lines[i-1] if i >= 1 else ""
+        duration = lines[i-2] if i >= 2 else ""
+        stops    = lines[i-3] if i >= 3 else ""
+        # 다음 줄 = 좌석 등급
+        cabin    = lines[i+1] if i+1 < len(lines) else ""
+
+        # 소요시간 패턴 검증 (N시간 M분)
+        if not re.search(r'\d+시간', duration):
+            continue
+        # 항공사 줄이 너무 길거나 이상하면 스킵
+        if len(airline) > 50 or not airline:
+            continue
+
+        results.append({
+            "price": price, "airline": airline,
+            "duration": duration, "stops": stops, "cabin": cabin,
+        })
+
+    # 가격순 정렬, 중복 제거
+    seen = set()
+    unique = []
+    for r in sorted(results, key=lambda x: x["price"]):
+        if r["price"] not in seen:
+            seen.add(r["price"])
+            unique.append(r)
+    return unique[:5]  # 최저가 5개
+
+
 async def scrape_kayak(pw, frm: str, to: str) -> dict | None:
     url = (
         f"https://www.kayak.co.kr/flights/{frm}-{to}/"
@@ -270,34 +337,25 @@ async def scrape_kayak(pw, frm: str, to: str) -> dict | None:
     browser, page = await new_page(pw)
     try:
         await page.goto(url, timeout=45_000, wait_until="domcontentloaded")
-        # 가격 카드 로딩 대기
         try:
             await page.wait_for_selector('[class*="esgW-price-holder"]', timeout=20_000)
         except Exception:
             await asyncio.sleep(random.uniform(6, 10))
 
-        # 정확한 셀렉터로 가격 추출
-        price_els = await page.query_selector_all('[class*="esgW-price-holder"]')
-        prices = []
-        for el in price_els:
-            txt = await el.inner_text()
-            # "80,277원부터" → 80277
-            m = re.search(r"([\d,]+)원", txt)
-            if m:
-                p = int(m.group(1).replace(",", ""))
-                if 50_000 < p < 5_000_000:
-                    prices.append(p)
+        body_text = await page.evaluate("() => document.body.innerText")
+        flights = parse_kayak_flights(body_text)
 
-        if prices:
-            return {"price": min(prices), "url": url}
-
-        # 폴백: 전체 텍스트 파싱
-        content = await page.content()
-        won_prices = [int(m.replace(",", "")) for m in re.findall(r"([\d,]{5,9})원", content)
-                      if 50_000 < int(m.replace(",", "")) < 5_000_000]
-        if won_prices:
-            return {"price": min(won_prices), "url": url}
-
+        if flights:
+            best = flights[0]
+            return {
+                "price":    best["price"],
+                "url":      url,
+                "airline":  best["airline"],
+                "duration": best["duration"],
+                "stops":    best["stops"],
+                "cabin":    best["cabin"],
+                "top_flights": flights,  # 상위 5개 전달
+            }
     except Exception as e:
         print(f"    [카약] {e}")
     finally:
@@ -401,7 +459,7 @@ async def check_route(pw, route: dict, prices: dict, threshold: int):
                 diff = prev - price
                 print(f"  [{source}] {price:,}원  (이전: {prev:,}원, 변동: {'+' if diff<0 else ''}{-diff:,}원)")
                 if price < prev - threshold:
-                    price_alert(name, key, price, prev, source, url)
+                    price_alert(name, key, price, prev, source, url, result)
             else:
                 print(f"  [{source}] {price:,}원  (첫 확인)")
 
